@@ -14,7 +14,6 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.bridge.WritableNativeMap
-import com.facebook.react.bridge.BaseActivityEventListener
 import com.facebook.react.module.annotations.ReactModule
 import java.io.File
 import java.io.IOException
@@ -25,17 +24,6 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
   NativeAudioRecorderSpec(reactContext) {
 
   private var permissionPromise: Promise? = null
-  private val activityEventListener = object : BaseActivityEventListener() {
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray): Boolean {
-      if (requestCode == PERMISSION_REQUEST_CODE && permissions.isNotEmpty()) {
-        val granted = grantResults[0] == PackageManager.PERMISSION_GRANTED
-        permissionPromise?.resolve(granted)
-        permissionPromise = null
-        return true
-      }
-      return false
-    }
-  }
 
   private var mediaRecorder: MediaRecorder? = null
   private var audioRecord: AudioRecord? = null
@@ -62,10 +50,6 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
   private val mainHandler = Handler(Looper.getMainLooper())
   private var levelMonitoringRunnable: Runnable? = null
   private var silenceTimeoutRunnable: Runnable? = null
-
-  init {
-    reactApplicationContext.addActivityEventListener(activityEventListener)
-  }
 
   override fun getName(): String {
     return NAME
@@ -384,14 +368,16 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
       return
     }
 
-    // Store the promise to resolve it when permission result comes back
-    permissionPromise = promise
-
+    // For TurboModule context, we'll request permission and return current status
+    // The calling code should handle the actual permission result via system callbacks
     ActivityCompat.requestPermissions(
       currentActivity,
       arrayOf(Manifest.permission.RECORD_AUDIO),
       PERMISSION_REQUEST_CODE
     )
+    
+    // Return false since permission was just requested
+    promise.resolve(false)
   }
 
   override fun addListener(eventName: String) {
@@ -429,7 +415,6 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
 
   override fun onCatalystInstanceDestroy() {
     super.onCatalystInstanceDestroy()
-    reactApplicationContext.removeActivityEventListener(activityEventListener)
     permissionPromise = null
   }
 
