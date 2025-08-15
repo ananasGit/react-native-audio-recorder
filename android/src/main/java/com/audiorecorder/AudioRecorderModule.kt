@@ -28,6 +28,9 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
   private var mediaRecorder: MediaRecorder? = null
   private var audioRecord: AudioRecord? = null
   private var isRecording = false
+  
+  // Use single recording approach
+  private var useSingleRecordingSource = true
   private var isPaused = false
   
   private var recordingStartTime: Long = 0
@@ -118,6 +121,42 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     val outputFile = File(outputDir, fileName)
     outputFilePath = outputFile.absolutePath
 
+    if (useSingleRecordingSource) {
+      // Use only MediaRecorder - it has built-in getMaxAmplitude()
+      setupMediaRecorderOnly(format, sampleRate, channels, bitRate)
+    } else {
+      // Original dual approach (for comparison)
+      setupDualRecording(format, sampleRate, channels, bitRate)
+    }
+  }
+
+  private fun setupMediaRecorderOnly(format: String, sampleRate: Int, channels: Int, bitRate: Int) {
+    mediaRecorder = MediaRecorder().apply {
+      // Use VOICE_RECOGNITION source for better voice detection
+      setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+      
+      when (format) {
+        "aac" -> setOutputFormat(MediaRecorder.OutputFormat.AAC_ADTS)
+        "mp3" -> setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+        "wav" -> setOutputFormat(MediaRecorder.OutputFormat.DEFAULT)
+        else -> setOutputFormat(MediaRecorder.OutputFormat.DEFAULT)
+      }
+      
+      when (format) {
+        "aac" -> setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+        "mp3" -> setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+        "wav" -> setAudioEncoder(MediaRecorder.AudioEncoder.DEFAULT)
+        else -> setAudioEncoder(MediaRecorder.AudioEncoder.DEFAULT)
+      }
+      
+      setAudioSamplingRate(sampleRate)
+      setAudioEncodingBitRate(bitRate)
+      setAudioChannels(channels)
+      setOutputFile(outputFilePath)
+    }
+  }
+
+  private fun setupDualRecording(format: String, sampleRate: Int, channels: Int, bitRate: Int) {
     // Setup MediaRecorder
     mediaRecorder = MediaRecorder().apply {
       setAudioSource(MediaRecorder.AudioSource.MIC)
@@ -140,13 +179,13 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
       setOutputFile(outputFilePath)
     }
 
-    // Setup AudioRecord for level monitoring
+    // Setup AudioRecord for level monitoring (DIFFERENT SOURCE)
     val channelConfig = if (channels == 1) AudioFormat.CHANNEL_IN_MONO else AudioFormat.CHANNEL_IN_STEREO
     val audioFormat = AudioFormat.ENCODING_PCM_16BIT
     val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
     
     audioRecord = AudioRecord(
-      MediaRecorder.AudioSource.MIC,
+      MediaRecorder.AudioSource.VOICE_RECOGNITION, // Different source!
       sampleRate,
       channelConfig,
       audioFormat,
@@ -158,7 +197,11 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     try {
       mediaRecorder?.prepare()
       mediaRecorder?.start()
-      audioRecord?.startRecording()
+      
+      // Only start AudioRecord if using dual approach
+      if (!useSingleRecordingSource) {
+        audioRecord?.startRecording()
+      }
       
       isRecording = true
       recordingStartTime = System.currentTimeMillis()
@@ -182,8 +225,44 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
   }
 
   private fun updateAudioLevels() {
-    if (!isRecording || audioRecord == null) return
+    if (!isRecording || mediaRecorder == null) return
 
+    val currentTime = System.currentTimeMillis()
+
+    // Check if we've reached max duration
+    if ((currentTime - recordingStartTime) / 1000.0 >= maxDurationSeconds) {
+      finishRecordingWithReason("max_duration_reached")
+      return
+    }
+
+    if (useSingleRecordingSource) {
+      updateAudioLevelsWithMediaRecorder(currentTime)
+    } else {
+      updateAudioLevelsWithAudioRecord(currentTime)
+    }
+  }
+
+  private fun updateAudioLevelsWithMediaRecorder(currentTime: Long) {
+    // Use MediaRecorder's built-in amplitude detection
+    val amplitude = try {
+      mediaRecorder?.maxAmplitude ?: 0
+    } catch (e: Exception) {
+      0
+    }
+    
+    // Convert amplitude to dB (MediaRecorder amplitude is 0-32767)
+    val dbLevel = if (amplitude > 0) {
+      20 * log10(amplitude.toDouble() / 32767.0)
+    } else {
+      -96.0
+    }
+
+    processVoiceActivity(dbLevel, currentTime)
+  }
+
+  private fun updateAudioLevelsWithAudioRecord(currentTime: Long) {
+    if (audioRecord == null) return
+    
     val bufferSize = 1024
     val buffer = ShortArray(bufferSize)
     val read = audioRecord!!.read(buffer, 0, bufferSize)
@@ -191,42 +270,40 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     if (read > 0) {
       val amplitude = calculateAmplitude(buffer, read)
       val dbLevel = amplitudeToDb(amplitude)
-      val currentTime = System.currentTimeMillis()
+      processVoiceActivity(dbLevel, currentTime)
+    }
+  }
 
-      // Check if we've reached max duration
-      if ((currentTime - recordingStartTime) / 1000.0 >= maxDurationSeconds) {
-        finishRecordingWithReason("max_duration_reached")
-        return
+  private fun processVoiceActivity(dbLevel: Double, currentTime: Long) {
+    // Simple but effective voice activity detection
+    val isVoice = dbLevel > noiseFloorDb && dbLevel > voiceActivityThresholdDb
+
+    if (isVoice) {
+      // Voice detected
+      if (!hasDetectedVoice) {
+        hasDetectedVoice = true
+        actualSpeechStartTime = currentTime
       }
 
-      // Voice activity detection
-      if (dbLevel > noiseFloorDb && dbLevel > voiceActivityThresholdDb) {
-        // Voice detected
-        if (!hasDetectedVoice) {
-          hasDetectedVoice = true
-          actualSpeechStartTime = currentTime
-        }
+      lastVoiceActivityTime = currentTime
+      isInThinkingPause = false
 
-        lastVoiceActivityTime = currentTime
-        isInThinkingPause = false
+      // Cancel any pending silence timer
+      silenceTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+      silenceTimeoutRunnable = null
 
-        // Cancel any pending silence timer
-        silenceTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
-        silenceTimeoutRunnable = null
+    } else if (hasDetectedVoice) {
+      // Silence detected after voice
+      val silenceDuration = (currentTime - lastVoiceActivityTime) / 1000.0
 
-      } else if (hasDetectedVoice) {
-        // Silence detected after voice
-        val silenceDuration = (currentTime - lastVoiceActivityTime) / 1000.0
+      if (silenceDuration >= thinkingPauseThreshold && !isInThinkingPause) {
+        // Entered thinking pause
+        isInThinkingPause = true
 
-        if (silenceDuration >= thinkingPauseThreshold && !isInThinkingPause) {
-          // Entered thinking pause
-          isInThinkingPause = true
-
-          // Schedule end-of-speech detection
-          val remainingTime = ((endOfSpeechThreshold - thinkingPauseThreshold) * 1000).toLong()
-          silenceTimeoutRunnable = Runnable { handleEndOfSpeech() }
-          mainHandler.postDelayed(silenceTimeoutRunnable!!, remainingTime)
-        }
+        // Schedule end-of-speech detection
+        val remainingTime = ((endOfSpeechThreshold - thinkingPauseThreshold) * 1000).toLong()
+        silenceTimeoutRunnable = Runnable { handleEndOfSpeech() }
+        mainHandler.postDelayed(silenceTimeoutRunnable!!, remainingTime)
       }
     }
   }
@@ -269,7 +346,9 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
 
     try {
       mediaRecorder?.stop()
-      audioRecord?.stop()
+      if (!useSingleRecordingSource) {
+        audioRecord?.stop()
+      }
       isRecording = false
 
       val endTime = System.currentTimeMillis()
@@ -322,7 +401,9 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     if (isRecording) {
       try {
         mediaRecorder?.stop()
-        audioRecord?.stop()
+        if (!useSingleRecordingSource) {
+          audioRecord?.stop()
+        }
         isRecording = false
 
         // Delete the file
