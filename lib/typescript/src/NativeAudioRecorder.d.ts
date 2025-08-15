@@ -20,7 +20,7 @@ export interface RecordingResult {
     error?: string;
 }
 export interface Spec extends TurboModule {
-    startRecording(config: RecordingConfig): Promise<void>;
+    startRecording(config: RecordingConfig): Promise<RecordingResult>;
     stopRecording(): Promise<RecordingResult>;
     cancelRecording(): Promise<void>;
     isRecording(): boolean;

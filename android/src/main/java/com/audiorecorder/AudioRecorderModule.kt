@@ -93,7 +93,8 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     try {
       setupRecording(config)
       startRecordingInternal()
-      promise.resolve(null)
+      // Don't resolve here - let finishRecordingWithReason handle the promise
+      android.util.Log.i("AudioRecorder", "Recording setup complete, waiting for voice activity detection")
     } catch (e: Exception) {
       // Clean up on failure
       cleanup()

@@ -127,7 +127,8 @@ RCT_EXPORT_MODULE()
     // Start level monitoring
     [self startLevelMonitoring];
     
-    resolve(nil);
+    // Don't resolve here - let finishRecordingWithReason handle the promise
+    NSLog(@"Recording setup complete, waiting for voice activity detection");
 }
 
 - (void)startLevelMonitoring {

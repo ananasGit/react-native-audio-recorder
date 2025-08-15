@@ -53,80 +53,16 @@ export class AudioRecorder {
     // Merge with defaults
     const fullConfig = { ...DEFAULT_CONFIG, ...config };
 
-    // Start recording and return a promise that resolves when recording ends
-    return new Promise((resolve, reject) => {
-      let isResolved = false;
-
-      // Start the recording
-      AudioRecorderNative.startRecording(fullConfig)
-        .then(() => {
-          // Recording started successfully
-          // Now we wait for either manual stop or automatic detection
-
-          // Set up a timeout as fallback for max duration
-          const maxTimeout = setTimeout(() => {
-            if (!isResolved) {
-              this.stopRecording().then(resolve).catch(reject);
-            }
-          }, fullConfig.maxDurationSeconds * 1000);
-
-          // Store the timeout and resolve function for later use
-          (this as any)._currentTimeout = maxTimeout;
-          (this as any)._currentResolve = (result: RecordingResult) => {
-            if (!isResolved) {
-              isResolved = true;
-              clearTimeout(maxTimeout);
-              resolve(result);
-            }
-          };
-          (this as any)._currentReject = (error: Error) => {
-            if (!isResolved) {
-              isResolved = true;
-              clearTimeout(maxTimeout);
-              reject(error);
-            }
-          };
-        })
-        .catch((error) => {
-          if (!isResolved) {
-            isResolved = true;
-            reject(error);
-          }
-        });
-    });
+    // Start recording - the native side will handle the full lifecycle and return the result
+    return AudioRecorderNative.startRecording(fullConfig);
   }
 
   static async stopRecording(): Promise<RecordingResult> {
-    try {
-      const result = await AudioRecorderNative.stopRecording();
-
-      // Clean up any pending timeouts/callbacks
-      if ((this as any)._currentTimeout) {
-        clearTimeout((this as any)._currentTimeout);
-        delete (this as any)._currentTimeout;
-      }
-
-      return result;
-    } catch (error) {
-      throw error;
-    } finally {
-      delete (this as any)._currentResolve;
-      delete (this as any)._currentReject;
-    }
+    return AudioRecorderNative.stopRecording();
   }
 
   static async cancelRecording(): Promise<void> {
-    try {
-      await AudioRecorderNative.cancelRecording();
-    } finally {
-      // Clean up any pending timeouts/callbacks
-      if ((this as any)._currentTimeout) {
-        clearTimeout((this as any)._currentTimeout);
-        delete (this as any)._currentTimeout;
-      }
-      delete (this as any)._currentResolve;
-      delete (this as any)._currentReject;
-    }
+    return AudioRecorderNative.cancelRecording();
   }
 
   static isRecording(): boolean {
