@@ -41,6 +41,12 @@ RCT_EXPORT_MODULE()
     self.maxDurationSeconds = config.maxDurationSeconds();
     self.minRecordingDurationMs = config.minRecordingDurationMs();
     
+    // Adjust thresholds for iOS AVAudioRecorder range (-160 to 0 dB)
+    [self adjustThresholdsForIOS];
+    
+    NSLog(@"[AudioRecorder] Config - Original NoiseFloor: %.1fdB, VoiceThreshold: %.1fdB, ThinkingThreshold: %.1fs, EndThreshold: %.1fs", 
+          self.noiseFloorDb, self.voiceActivityThresholdDb, self.thinkingPauseThreshold, self.endOfSpeechThreshold);
+    
     // Reset state
     self.recordingStartTime = 0;
     self.lastVoiceActivityTime = 0;
@@ -51,16 +57,29 @@ RCT_EXPORT_MODULE()
     self.currentPromiseResolve = resolve;
     self.currentPromiseReject = reject;
     
-    // Setup audio session
+    // Setup audio session with proper category for recording
     AVAudioSession *session = [AVAudioSession sharedInstance];
     NSError *error = nil;
     
-    [session setCategory:AVAudioSessionCategoryPlayAndRecord 
-                 options:AVAudioSessionCategoryOptionDefaultToSpeaker 
+    // Use Record category for better recording performance and noise reduction
+    [session setCategory:AVAudioSessionCategoryRecord
+                    mode:AVAudioSessionModeMeasurement  // Better for voice recording
+                 options:AVAudioSessionCategoryOptionAllowBluetooth
                    error:&error];
     if (error) {
         reject(@"audio_session_error", @"Failed to setup audio session", error);
         return;
+    }
+    
+    // Set preferred sample rate and buffer duration for better VAD
+    [session setPreferredSampleRate:config.sampleRate() error:&error];
+    if (error) {
+        NSLog(@"[AudioRecorder] Warning: Could not set preferred sample rate: %@", error.localizedDescription);
+    }
+    
+    [session setPreferredIOBufferDuration:0.01 error:&error]; // 10ms for responsive VAD
+    if (error) {
+        NSLog(@"[AudioRecorder] Warning: Could not set buffer duration: %@", error.localizedDescription);
     }
     
     [session setActive:YES error:&error];
@@ -83,15 +102,28 @@ RCT_EXPORT_MODULE()
         return;
     }
     
-    // Setup recording settings
+    // Setup recording settings with proper format handling
     NSMutableDictionary *settings = [[NSMutableDictionary alloc] init];
+    NSString *actualFormat = config.format();
     
-    if ([config.format() isEqualToString:@"aac"]) {
+    // Handle format compatibility - iOS doesn't support MP3 encoding
+    if ([config.format() isEqualToString:@"mp3"]) {
+        actualFormat = @"m4a"; // Use M4A instead
         settings[AVFormatIDKey] = @(kAudioFormatMPEG4AAC);
-    } else if ([config.format() isEqualToString:@"mp3"]) {
-        settings[AVFormatIDKey] = @(kAudioFormatMPEGLayer3);
-    } else {
+        NSLog(@"[AudioRecorder] MP3 format not supported on iOS, using M4A/AAC instead");
+    } else if ([config.format() isEqualToString:@"aac"]) {
+        settings[AVFormatIDKey] = @(kAudioFormatMPEG4AAC);
+    } else if ([config.format() isEqualToString:@"wav"]) {
         settings[AVFormatIDKey] = @(kAudioFormatLinearPCM);
+        // WAV-specific settings
+        settings[AVLinearPCMBitDepthKey] = @(16);
+        settings[AVLinearPCMIsBigEndianKey] = @(NO);
+        settings[AVLinearPCMIsFloatKey] = @(NO);
+    } else {
+        // Default to AAC for unknown formats
+        actualFormat = @"aac";
+        settings[AVFormatIDKey] = @(kAudioFormatMPEG4AAC);
+        NSLog(@"[AudioRecorder] Unknown format '%@', defaulting to AAC", config.format());
     }
     
     settings[AVSampleRateKey] = @(config.sampleRate());
@@ -99,11 +131,14 @@ RCT_EXPORT_MODULE()
     settings[AVEncoderBitRateKey] = @(config.bitRate());
     settings[AVEncoderAudioQualityKey] = @(AVAudioQualityHigh);
     
-    // Create output file path
+    // Create output file path with corrected format
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *documentsDirectory = [paths objectAtIndex:0];
-    NSString *fileName = [NSString stringWithFormat:@"recording_%f.%@", [[NSDate date] timeIntervalSince1970], config.format()];
+    NSString *fileName = [NSString stringWithFormat:@"recording_%f.%@", [[NSDate date] timeIntervalSince1970], actualFormat];
     NSURL *outputFileURL = [NSURL fileURLWithPath:[documentsDirectory stringByAppendingPathComponent:fileName]];
+    
+    NSLog(@"[AudioRecorder] Creating recording file: %@ (requested: %@, actual: %@)", 
+          fileName, config.format(), actualFormat);
     
     // Create recorder
     self.audioRecorder = [[AVAudioRecorder alloc] initWithURL:outputFileURL settings:settings error:&error];
@@ -124,11 +159,40 @@ RCT_EXPORT_MODULE()
     
     self.recordingStartTime = [[NSDate date] timeIntervalSince1970];
     
+    NSLog(@"[AudioRecorder] Recording started successfully at %.3f", self.recordingStartTime);
+    
     // Start level monitoring
     [self startLevelMonitoring];
     
     // Don't resolve here - let finishRecordingWithReason handle the promise
-    NSLog(@"Recording setup complete, waiting for voice activity detection");
+    NSLog(@"[AudioRecorder] Recording setup complete, waiting for voice activity detection");
+}
+
+- (void)adjustThresholdsForIOS {
+    // CRITICAL: AVAudioRecorder uses different dB range (-160 to 0) than Android
+    // Android MediaRecorder uses 0-32767 amplitude converted to dB
+    // We need to map our Android-compatible thresholds to iOS range
+    
+    // If thresholds seem to be in Android range (negative values closer to 0), adjust them
+    if (self.noiseFloorDb > -100) {
+        // Likely Android-style threshold, map to iOS range
+        // Android -50dB noise floor -> iOS -80dB noise floor
+        // Android -35dB voice threshold -> iOS -40dB voice threshold
+        self.noiseFloorDb = self.noiseFloorDb - 30.0;  // Make more negative for iOS
+        self.voiceActivityThresholdDb = self.voiceActivityThresholdDb - 5.0;  // Adjust voice threshold
+        
+        NSLog(@"[AudioRecorder] Adjusted thresholds for iOS: NoiseFloor: %.1fdB, VoiceThreshold: %.1fdB", 
+              self.noiseFloorDb, self.voiceActivityThresholdDb);
+    }
+    
+    // Ensure values are within iOS range
+    self.noiseFloorDb = MAX(-160.0, MIN(0.0, self.noiseFloorDb));
+    self.voiceActivityThresholdDb = MAX(-160.0, MIN(0.0, self.voiceActivityThresholdDb));
+    
+    // Ensure voice threshold is higher than noise floor
+    if (self.voiceActivityThresholdDb <= self.noiseFloorDb) {
+        self.voiceActivityThresholdDb = self.noiseFloorDb + 10.0;
+    }
 }
 
 - (void)startLevelMonitoring {
@@ -146,21 +210,37 @@ RCT_EXPORT_MODULE()
     }
     
     [self.audioRecorder updateMeters];
-    float averagePower = [self.audioRecorder averagePowerForChannel:0];
+    float averagePower = [self.audioRecorder averagePowerForChannel:0]; // This is already in dB
     NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
+    
+    // Add detailed logging with proper AVAudioRecorder range understanding
+    NSLog(@"[AudioRecorder] Audio Level - Raw dB: %.1f (Range: -160 to 0), ConfigNoiseFloor: %.1f, ConfigVoiceThreshold: %.1f", 
+          averagePower, self.noiseFloorDb, self.voiceActivityThresholdDb);
     
     // Check if we've reached max duration
     if (currentTime - self.recordingStartTime >= self.maxDurationSeconds) {
+        NSLog(@"[AudioRecorder] FINISHING RECORDING - Reason: max_duration_reached");
         [self finishRecordingWithReason:@"max_duration_reached"];
         return;
     }
     
-    // Voice activity detection
-    if (averagePower > self.noiseFloorDb && averagePower > self.voiceActivityThresholdDb) {
+    [self processVoiceActivity:averagePower currentTime:currentTime];
+}
+
+- (void)processVoiceActivity:(float)dbLevel currentTime:(NSTimeInterval)currentTime {
+    // Voice activity detection using pre-adjusted thresholds for iOS range (-160 to 0 dB)
+    BOOL isVoice = (dbLevel > self.noiseFloorDb) && (dbLevel > self.voiceActivityThresholdDb);
+    
+    NSLog(@"[AudioRecorder] Voice Activity - dB: %.1f, NoiseFloor: %.1f, VoiceThreshold: %.1f, isVoice: %@, hasDetectedVoice: %@", 
+          dbLevel, self.noiseFloorDb, self.voiceActivityThresholdDb, isVoice ? @"YES" : @"NO", self.hasDetectedVoice ? @"YES" : @"NO");
+    
+    if (isVoice) {
         // Voice detected
         if (!self.hasDetectedVoice) {
             self.hasDetectedVoice = YES;
             self.actualSpeechStartTime = currentTime;
+            NSTimeInterval timeSinceStart = (currentTime - self.recordingStartTime) * 1000; // Convert to ms
+            NSLog(@"[AudioRecorder] VOICE STARTED - First voice detected at %.0fms", timeSinceStart);
         }
         
         self.lastVoiceActivityTime = currentTime;
@@ -174,12 +254,17 @@ RCT_EXPORT_MODULE()
         // Silence detected after voice
         NSTimeInterval silenceDuration = currentTime - self.lastVoiceActivityTime;
         
+        NSLog(@"[AudioRecorder] SILENCE - Duration: %.1fs, ThinkingThreshold: %.1fs, EndThreshold: %.1fs", 
+              silenceDuration, self.thinkingPauseThreshold, self.endOfSpeechThreshold);
+        
         if (silenceDuration >= self.thinkingPauseThreshold && !self.isInThinkingPause) {
             // Entered thinking pause
             self.isInThinkingPause = YES;
+            NSLog(@"[AudioRecorder] THINKING PAUSE - Entered at %.1fs", silenceDuration);
             
-            // Schedule end-of-speech detection
-            self.silenceTimer = [NSTimer scheduledTimerWithTimeInterval:self.endOfSpeechThreshold - self.thinkingPauseThreshold
+            // Schedule end-of-speech detection with calculated remaining time
+            NSTimeInterval remainingTime = self.endOfSpeechThreshold - self.thinkingPauseThreshold;
+            self.silenceTimer = [NSTimer scheduledTimerWithTimeInterval:remainingTime
                                                                  target:self
                                                                selector:@selector(handleEndOfSpeech)
                                                                userInfo:nil
@@ -189,35 +274,54 @@ RCT_EXPORT_MODULE()
 }
 
 - (void)handleEndOfSpeech {
-    // Check if we still haven't detected voice after the end-of-speech threshold
     NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
     NSTimeInterval totalSilence = currentTime - self.lastVoiceActivityTime;
+    NSTimeInterval totalRecordingDuration = (currentTime - self.recordingStartTime) * 1000; // Convert to ms
+    
+    NSLog(@"[AudioRecorder] END OF SPEECH CHECK - TotalSilence: %.1fs, Threshold: %.1fs, RecordingDuration: %.0fms, MinDuration: %.0fms", 
+          totalSilence, self.endOfSpeechThreshold, totalRecordingDuration, self.minRecordingDurationMs);
     
     if (totalSilence >= self.endOfSpeechThreshold) {
         // Calculate actual speech duration (excluding final silence)
         self.totalSpeechDuration = self.lastVoiceActivityTime - self.actualSpeechStartTime;
         
+        NSLog(@"[AudioRecorder] SILENCE THRESHOLD MET - SpeechDuration: %.1fs", self.totalSpeechDuration);
+        
         // Only finish if we have minimum recording duration
-        if ((currentTime - self.recordingStartTime) * 1000 >= self.minRecordingDurationMs) {
+        if (totalRecordingDuration >= self.minRecordingDurationMs) {
+            NSLog(@"[AudioRecorder] FINISHING RECORDING - Reason: silence_detected");
             [self finishRecordingWithReason:@"silence_detected"];
+        } else {
+            NSLog(@"[AudioRecorder] Recording too short - Need %.0fms, have %.0fms", 
+                  self.minRecordingDurationMs, totalRecordingDuration);
         }
+    } else {
+        NSLog(@"[AudioRecorder] Silence not long enough yet - %.1fs < %.1fs", 
+              totalSilence, self.endOfSpeechThreshold);
     }
 }
 
 - (void)finishRecordingWithReason:(NSString *)reason {
+    NSLog(@"[AudioRecorder] finishRecordingWithReason called with reason: %@", reason);
+    
     [self.levelTimer invalidate];
     [self.silenceTimer invalidate];
     self.levelTimer = nil;
     self.silenceTimer = nil;
     
     if (!self.audioRecorder) {
+        NSLog(@"[AudioRecorder] finishRecordingWithReason - No audio recorder available");
         return;
     }
     
     [self.audioRecorder stop];
+    NSLog(@"[AudioRecorder] Audio recorder stopped");
     
     NSTimeInterval endTime = [[NSDate date] timeIntervalSince1970];
     double totalDuration = endTime - self.recordingStartTime;
+    
+    NSLog(@"[AudioRecorder] Recording finished - TotalDuration: %.1fs, SpeechDuration: %.1fs, Reason: %@", 
+          totalDuration, self.totalSpeechDuration, reason);
     
     // Get file info
     NSURL *fileURL = self.audioRecorder.url;
@@ -227,9 +331,12 @@ RCT_EXPORT_MODULE()
     NSDictionary *fileAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:&error];
     unsigned long long fileSize = error ? 0 : [fileAttributes fileSize];
     
+    NSLog(@"[AudioRecorder] File info - Path: %@, Size: %llu bytes", filePath, fileSize);
+    
     // Ensure we have a valid file
     if (fileSize == 0 && !error) {
         error = [NSError errorWithDomain:@"AudioRecorderError" code:1001 userInfo:@{NSLocalizedDescriptionKey: @"Recording file is empty"}];
+        NSLog(@"[AudioRecorder] Error: Recording file is empty");
     }
     
     if (self.currentPromiseResolve) {
@@ -257,7 +364,10 @@ RCT_EXPORT_MODULE()
 - (void)stopRecording:(RCTPromiseResolveBlock)resolve
                reject:(RCTPromiseRejectBlock)reject {
     
+    NSLog(@"[AudioRecorder] stopRecording called, isRecording: %@", self.audioRecorder.isRecording ? @"YES" : @"NO");
+    
     if (!self.audioRecorder || !self.audioRecorder.isRecording) {
+        NSLog(@"[AudioRecorder] stopRecording failed - No recording in progress");
         reject(@"not_recording", @"No recording in progress", nil);
         return;
     }
@@ -270,23 +380,35 @@ RCT_EXPORT_MODULE()
     NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
     if (self.hasDetectedVoice) {
         self.totalSpeechDuration = currentTime - self.actualSpeechStartTime;
+        NSLog(@"[AudioRecorder] Manual stop - calculated speech duration: %.1fs", self.totalSpeechDuration);
     }
     
+    NSLog(@"[AudioRecorder] FINISHING RECORDING - Reason: manual_stop");
     [self finishRecordingWithReason:@"manual_stop"];
 }
 
 - (void)cancelRecording:(RCTPromiseResolveBlock)resolve
                  reject:(RCTPromiseRejectBlock)reject {
     
+    NSLog(@"[AudioRecorder] cancelRecording called, isRecording: %@", self.audioRecorder.isRecording ? @"YES" : @"NO");
+    
     [self.levelTimer invalidate];
     [self.silenceTimer invalidate];
     
     if (self.audioRecorder) {
         [self.audioRecorder stop];
+        NSLog(@"[AudioRecorder] Recording stopped for cancellation");
         
         // Delete the file
         NSError *error;
-        [[NSFileManager defaultManager] removeItemAtURL:self.audioRecorder.url error:&error];
+        NSURL *fileURL = self.audioRecorder.url;
+        [[NSFileManager defaultManager] removeItemAtURL:fileURL error:&error];
+        
+        if (error) {
+            NSLog(@"[AudioRecorder] Error deleting recording file: %@", error.localizedDescription);
+        } else {
+            NSLog(@"[AudioRecorder] Recording file deleted successfully");
+        }
         
         self.audioRecorder = nil;
     }
@@ -294,6 +416,7 @@ RCT_EXPORT_MODULE()
     self.currentPromiseResolve = nil;
     self.currentPromiseReject = nil;
     
+    NSLog(@"[AudioRecorder] Recording cancelled successfully");
     resolve(nil);
 }
 
