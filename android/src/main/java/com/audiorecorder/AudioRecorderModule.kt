@@ -349,15 +349,25 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
   private fun handleEndOfSpeech() {
     val currentTime = System.currentTimeMillis()
     val totalSilence = (currentTime - lastVoiceActivityTime) / 1000.0
+    val totalRecordingDuration = currentTime - recordingStartTime
+
+    android.util.Log.i("AudioRecorder", "END OF SPEECH CHECK - TotalSilence: ${totalSilence}s, Threshold: $endOfSpeechThreshold, RecordingDuration: ${totalRecordingDuration}ms, MinDuration: $minRecordingDurationMs")
 
     if (totalSilence >= endOfSpeechThreshold) {
       // Calculate actual speech duration (excluding final silence)
       totalSpeechDuration = (lastVoiceActivityTime - actualSpeechStartTime) / 1000.0
+      
+      android.util.Log.i("AudioRecorder", "SILENCE THRESHOLD MET - SpeechDuration: ${totalSpeechDuration}s")
 
       // Only finish if we have minimum recording duration
-      if ((currentTime - recordingStartTime) >= minRecordingDurationMs) {
+      if (totalRecordingDuration >= minRecordingDurationMs) {
+        android.util.Log.i("AudioRecorder", "FINISHING RECORDING - Reason: silence_detected")
         finishRecordingWithReason("silence_detected")
+      } else {
+        android.util.Log.w("AudioRecorder", "Recording too short - Need ${minRecordingDurationMs}ms, have ${totalRecordingDuration}ms")
       }
+    } else {
+      android.util.Log.d("AudioRecorder", "Silence not long enough yet - ${totalSilence}s < $endOfSpeechThreshold")
     }
   }
 
