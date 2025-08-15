@@ -36,16 +36,26 @@ RCT_EXPORT_MODULE()
     // Store config
     self.thinkingPauseThreshold = config.thinkingPauseThreshold();
     self.endOfSpeechThreshold = config.endOfSpeechThreshold();
-    self.noiseFloorDb = config.noiseFloorDb();
-    self.voiceActivityThresholdDb = config.voiceActivityThresholdDb();
     self.maxDurationSeconds = config.maxDurationSeconds();
     self.minRecordingDurationMs = config.minRecordingDurationMs();
+    
+    // Store VAD thresholds with fallback defaults (matching Android behavior)
+    self.noiseFloorDb = config.noiseFloorDb();
+    self.voiceActivityThresholdDb = config.voiceActivityThresholdDb();
+    
+    // Fallback to default values if not provided or invalid
+    if (self.noiseFloorDb == 0.0) {
+        self.noiseFloorDb = -50.0;
+    }
+    if (self.voiceActivityThresholdDb == 0.0) {
+        self.voiceActivityThresholdDb = -35.0;
+    }
     
     // Adjust thresholds for iOS AVAudioRecorder range (-160 to 0 dB)
     [self adjustThresholdsForIOS];
     
-    NSLog(@"[AudioRecorder] Config - Original NoiseFloor: %.1fdB, VoiceThreshold: %.1fdB, ThinkingThreshold: %.1fs, EndThreshold: %.1fs", 
-          self.noiseFloorDb, self.voiceActivityThresholdDb, self.thinkingPauseThreshold, self.endOfSpeechThreshold);
+    NSLog(@"[AudioRecorder] Config - NoiseFloor: %.1fdB, VoiceThreshold: %.1fdB, EndThreshold: %.1fs", 
+          self.noiseFloorDb, self.voiceActivityThresholdDb, self.endOfSpeechThreshold);
     
     // Reset state
     self.recordingStartTime = 0;
@@ -158,6 +168,7 @@ RCT_EXPORT_MODULE()
     
     self.audioRecorder.delegate = self;
     self.audioRecorder.meteringEnabled = YES;
+    NSLog(@"[AudioRecorder] AVAudioRecorder created and configured");
     
     // Start recording
     BOOL success = [self.audioRecorder record];
@@ -167,8 +178,7 @@ RCT_EXPORT_MODULE()
     }
     
     self.recordingStartTime = [[NSDate date] timeIntervalSince1970];
-    
-    NSLog(@"[AudioRecorder] Recording started successfully at %.3f", self.recordingStartTime);
+    NSLog(@"[AudioRecorder] Recording started successfully at %.0f", self.recordingStartTime);
     
     // Start level monitoring
     [self startLevelMonitoring];
@@ -212,9 +222,15 @@ RCT_EXPORT_MODULE()
                                                       repeats:YES];
 }
 
+- (void)stopLevelMonitoring {
+    [self.levelTimer invalidate];
+    [self.silenceTimer invalidate];
+    self.levelTimer = nil;
+    self.silenceTimer = nil;
+}
+
 - (void)updateAudioLevels {
     if (!self.audioRecorder || !self.audioRecorder.isRecording) {
-        [self.levelTimer invalidate];
         return;
     }
     
@@ -223,8 +239,8 @@ RCT_EXPORT_MODULE()
     NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
     
     // Add detailed logging with proper AVAudioRecorder range understanding
-    NSLog(@"[AudioRecorder] Audio Level - Raw dB: %.1f (Range: -160 to 0), ConfigNoiseFloor: %.1f, ConfigVoiceThreshold: %.1f", 
-          averagePower, self.noiseFloorDb, self.voiceActivityThresholdDb);
+    NSLog(@"[AudioRecorder] Amplitude: %.0f, dB: %.1f, NoiseFloor: %.1f, VoiceThreshold: %.1f", 
+          averagePower, averagePower, self.noiseFloorDb, self.voiceActivityThresholdDb);
     
     // Check if we've reached max duration
     if (currentTime - self.recordingStartTime >= self.maxDurationSeconds) {
@@ -311,72 +327,55 @@ RCT_EXPORT_MODULE()
 }
 
 - (void)finishRecordingWithReason:(NSString *)reason {
-    NSLog(@"[AudioRecorder] finishRecordingWithReason called with reason: %@", reason);
-    
-    [self.levelTimer invalidate];
-    [self.silenceTimer invalidate];
-    self.levelTimer = nil;
-    self.silenceTimer = nil;
-    
-    if (!self.audioRecorder) {
-        NSLog(@"[AudioRecorder] finishRecordingWithReason - No audio recorder available");
+    [self stopLevelMonitoring];
+
+    if (!self.audioRecorder || !self.audioRecorder.isRecording) {
         return;
     }
-    
-    [self.audioRecorder stop];
-    NSLog(@"[AudioRecorder] Audio recorder stopped");
-    
-    NSTimeInterval endTime = [[NSDate date] timeIntervalSince1970];
-    double totalDuration = endTime - self.recordingStartTime;
-    
-    NSLog(@"[AudioRecorder] Recording finished - TotalDuration: %.1fs, SpeechDuration: %.1fs, Reason: %@", 
-          totalDuration, self.totalSpeechDuration, reason);
-    
-    // Get file info
-    NSURL *fileURL = self.audioRecorder.url;
-    NSString *filePath = [fileURL path];
-    
-    NSError *error;
-    NSDictionary *fileAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:&error];
-    unsigned long long fileSize = error ? 0 : [fileAttributes fileSize];
-    
-    NSLog(@"[AudioRecorder] File info - Path: %@, Size: %llu bytes", filePath, fileSize);
-    
-    // Ensure we have a valid file
-    if (fileSize == 0 && !error) {
-        error = [NSError errorWithDomain:@"AudioRecorderError" code:1001 userInfo:@{NSLocalizedDescriptionKey: @"Recording file is empty"}];
-        NSLog(@"[AudioRecorder] Error: Recording file is empty");
-    }
-    
-    if (self.currentPromiseResolve) {
-        if (error && [reason isEqualToString:@"error"]) {
-            self.currentPromiseReject(@"recording_error", error.localizedDescription, error);
-        } else {
-            NSDictionary *result = @{
-                @"filePath": filePath ?: @"",
-                @"duration": @(totalDuration),
-                @"actualSpeechDuration": @(self.totalSpeechDuration),
-                @"fileSize": @(fileSize),
-                @"reason": reason
-            };
-            
+
+    @try {
+        [self.audioRecorder stop];
+
+        NSTimeInterval endTime = [[NSDate date] timeIntervalSince1970];
+        double totalDuration = endTime - self.recordingStartTime;
+
+        // Get file info
+        NSURL *fileURL = self.audioRecorder.url;
+        NSString *filePath = [fileURL path];
+
+        NSError *error;
+        NSDictionary *fileAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:&error];
+        unsigned long long fileSize = error ? 0 : [fileAttributes fileSize];
+
+        NSDictionary *result = @{
+            @"filePath": filePath ?: @"",
+            @"duration": @(totalDuration),
+            @"actualSpeechDuration": @(self.totalSpeechDuration),
+            @"fileSize": @(fileSize),
+            @"reason": reason
+        };
+
+        if (self.currentPromiseResolve) {
             self.currentPromiseResolve(result);
         }
-        
         self.currentPromiseResolve = nil;
         self.currentPromiseReject = nil;
+
+    } @catch (NSException *exception) {
+        if (self.currentPromiseReject) {
+            self.currentPromiseReject(@"recording_finish_error", [NSString stringWithFormat:@"Failed to finish recording: %@", exception.reason], nil);
+        }
+        self.currentPromiseResolve = nil;
+        self.currentPromiseReject = nil;
+    } @finally {
+        self.audioRecorder = nil;
     }
-    
-    self.audioRecorder = nil;
 }
 
 - (void)stopRecording:(RCTPromiseResolveBlock)resolve
                reject:(RCTPromiseRejectBlock)reject {
     
-    NSLog(@"[AudioRecorder] stopRecording called, isRecording: %@", self.audioRecorder.isRecording ? @"YES" : @"NO");
-    
     if (!self.audioRecorder || !self.audioRecorder.isRecording) {
-        NSLog(@"[AudioRecorder] stopRecording failed - No recording in progress");
         reject(@"not_recording", @"No recording in progress", nil);
         return;
     }
@@ -389,43 +388,32 @@ RCT_EXPORT_MODULE()
     NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
     if (self.hasDetectedVoice) {
         self.totalSpeechDuration = currentTime - self.actualSpeechStartTime;
-        NSLog(@"[AudioRecorder] Manual stop - calculated speech duration: %.1fs", self.totalSpeechDuration);
     }
-    
-    NSLog(@"[AudioRecorder] FINISHING RECORDING - Reason: manual_stop");
+
     [self finishRecordingWithReason:@"manual_stop"];
 }
 
 - (void)cancelRecording:(RCTPromiseResolveBlock)resolve
                  reject:(RCTPromiseRejectBlock)reject {
     
-    NSLog(@"[AudioRecorder] cancelRecording called, isRecording: %@", self.audioRecorder.isRecording ? @"YES" : @"NO");
-    
-    [self.levelTimer invalidate];
-    [self.silenceTimer invalidate];
-    
+    [self stopLevelMonitoring];
+
     if (self.audioRecorder) {
-        [self.audioRecorder stop];
-        NSLog(@"[AudioRecorder] Recording stopped for cancellation");
-        
-        // Delete the file
-        NSError *error;
-        NSURL *fileURL = self.audioRecorder.url;
-        [[NSFileManager defaultManager] removeItemAtURL:fileURL error:&error];
-        
-        if (error) {
-            NSLog(@"[AudioRecorder] Error deleting recording file: %@", error.localizedDescription);
-        } else {
-            NSLog(@"[AudioRecorder] Recording file deleted successfully");
+        @try {
+            [self.audioRecorder stop];
+
+            // Delete the file
+            NSError *error;
+            NSURL *fileURL = self.audioRecorder.url;
+            [[NSFileManager defaultManager] removeItemAtURL:fileURL error:&error];
+        } @catch (NSException *exception) {
+            // Ignore errors during cleanup
         }
-        
         self.audioRecorder = nil;
     }
-    
+
     self.currentPromiseResolve = nil;
     self.currentPromiseReject = nil;
-    
-    NSLog(@"[AudioRecorder] Recording cancelled successfully");
     resolve(nil);
 }
 
