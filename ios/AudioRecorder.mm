@@ -69,6 +69,20 @@ RCT_EXPORT_MODULE()
         return;
     }
     
+    // Validate configuration
+    if (config.sampleRate() < 8000 || config.sampleRate() > 48000) {
+        reject(@"invalid_config", @"Sample rate must be between 8000 and 48000 Hz", nil);
+        return;
+    }
+    if (config.channels() < 1 || config.channels() > 2) {
+        reject(@"invalid_config", @"Channels must be 1 (mono) or 2 (stereo)", nil);
+        return;
+    }
+    if (config.bitRate() < 8000 || config.bitRate() > 320000) {
+        reject(@"invalid_config", @"Bit rate must be between 8000 and 320000 bps", nil);
+        return;
+    }
+    
     // Setup recording settings
     NSMutableDictionary *settings = [[NSMutableDictionary alloc] init];
     
@@ -192,6 +206,8 @@ RCT_EXPORT_MODULE()
 - (void)finishRecordingWithReason:(NSString *)reason {
     [self.levelTimer invalidate];
     [self.silenceTimer invalidate];
+    self.levelTimer = nil;
+    self.silenceTimer = nil;
     
     if (!self.audioRecorder) {
         return;
@@ -210,16 +226,26 @@ RCT_EXPORT_MODULE()
     NSDictionary *fileAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:&error];
     unsigned long long fileSize = error ? 0 : [fileAttributes fileSize];
     
+    // Ensure we have a valid file
+    if (fileSize == 0 && !error) {
+        error = [NSError errorWithDomain:@"AudioRecorderError" code:1001 userInfo:@{NSLocalizedDescriptionKey: @"Recording file is empty"}];
+    }
+    
     if (self.currentPromiseResolve) {
-        NSDictionary *result = @{
-            @"filePath": filePath,
-            @"duration": @(totalDuration),
-            @"actualSpeechDuration": @(self.totalSpeechDuration),
-            @"fileSize": @(fileSize),
-            @"reason": reason
-        };
+        if (error && [reason isEqualToString:@"error"]) {
+            self.currentPromiseReject(@"recording_error", error.localizedDescription, error);
+        } else {
+            NSDictionary *result = @{
+                @"filePath": filePath ?: @"",
+                @"duration": @(totalDuration),
+                @"actualSpeechDuration": @(self.totalSpeechDuration),
+                @"fileSize": @(fileSize),
+                @"reason": reason
+            };
+            
+            self.currentPromiseResolve(result);
+        }
         
-        self.currentPromiseResolve(result);
         self.currentPromiseResolve = nil;
         self.currentPromiseReject = nil;
     }

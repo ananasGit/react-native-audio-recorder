@@ -3,7 +3,6 @@ package com.audiorecorder
 import android.Manifest
 import android.content.pm.PackageManager
 import android.media.MediaRecorder
-import android.media.AudioManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.os.Handler
@@ -15,6 +14,7 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.bridge.WritableNativeMap
+import com.facebook.react.bridge.BaseActivityEventListener
 import com.facebook.react.module.annotations.ReactModule
 import java.io.File
 import java.io.IOException
@@ -23,6 +23,19 @@ import kotlin.math.*
 @ReactModule(name = AudioRecorderModule.NAME)
 class AudioRecorderModule(reactContext: ReactApplicationContext) :
   NativeAudioRecorderSpec(reactContext) {
+
+  private var permissionPromise: Promise? = null
+  private val activityEventListener = object : BaseActivityEventListener() {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray): Boolean {
+      if (requestCode == PERMISSION_REQUEST_CODE && permissions.isNotEmpty()) {
+        val granted = grantResults[0] == PackageManager.PERMISSION_GRANTED
+        permissionPromise?.resolve(granted)
+        permissionPromise = null
+        return true
+      }
+      return false
+    }
+  }
 
   private var mediaRecorder: MediaRecorder? = null
   private var audioRecord: AudioRecord? = null
@@ -49,6 +62,10 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
   private val mainHandler = Handler(Looper.getMainLooper())
   private var levelMonitoringRunnable: Runnable? = null
   private var silenceTimeoutRunnable: Runnable? = null
+
+  init {
+    reactApplicationContext.addActivityEventListener(activityEventListener)
+  }
 
   override fun getName(): String {
     return NAME
@@ -87,6 +104,9 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
       startRecordingInternal()
       promise.resolve(null)
     } catch (e: Exception) {
+      // Clean up on failure
+      cleanup()
+      currentPromise = null
       promise.reject("recording_setup_error", "Failed to setup recording: ${e.message}")
     }
   }
@@ -96,6 +116,17 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     val sampleRate = config.getInt("sampleRate")
     val channels = config.getInt("channels")
     val bitRate = config.getInt("bitRate")
+
+    // Validate configuration
+    if (sampleRate < 8000 || sampleRate > 48000) {
+      throw IllegalArgumentException("Sample rate must be between 8000 and 48000 Hz")
+    }
+    if (channels < 1 || channels > 2) {
+      throw IllegalArgumentException("Channels must be 1 (mono) or 2 (stereo)")
+    }
+    if (bitRate < 8000 || bitRate > 320000) {
+      throw IllegalArgumentException("Bit rate must be between 8000 and 320000 bps")
+    }
 
     // Create output file
     val outputDir = reactApplicationContext.getExternalFilesDir(null)
@@ -341,23 +372,26 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
   }
 
   override fun requestMicrophonePermission(promise: Promise) {
+    val hasPermission = hasRecordAudioPermission()
+    if (hasPermission) {
+      promise.resolve(true)
+      return
+    }
+
     val currentActivity = currentActivity
     if (currentActivity == null) {
       promise.reject("no_activity", "No current activity available")
       return
     }
 
-    // Note: In a real implementation, you'd need to handle the permission result callback
-    // This is a simplified version
+    // Store the promise to resolve it when permission result comes back
+    permissionPromise = promise
+
     ActivityCompat.requestPermissions(
       currentActivity,
       arrayOf(Manifest.permission.RECORD_AUDIO),
       PERMISSION_REQUEST_CODE
     )
-
-    // For now, just check current permission status
-    val hasPermission = hasRecordAudioPermission()
-    promise.resolve(hasPermission)
   }
 
   override fun addListener(eventName: String) {
@@ -391,6 +425,12 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     }
     mediaRecorder = null
     audioRecord = null
+  }
+
+  override fun onCatalystInstanceDestroy() {
+    super.onCatalystInstanceDestroy()
+    reactApplicationContext.removeActivityEventListener(activityEventListener)
+    permissionPromise = null
   }
 
   companion object {

@@ -199,10 +199,6 @@ interface SimpleRecordingConfig {
 }
 ```
 
-## Example App
-
-Check out the `/example` folder for a complete React Native app demonstrating all features.
-
 ## Comparison with Other Libraries
 
 | Feature | react-native-audio-recorder | react-native-audio-recorder-player | Others |
