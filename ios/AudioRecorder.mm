@@ -188,30 +188,18 @@ RCT_EXPORT_MODULE()
 }
 
 - (void)adjustThresholdsForIOS {
-    // CRITICAL: AVAudioRecorder uses different dB range (-160 to 0) than Android
-    // Android MediaRecorder uses 0-32767 amplitude converted to dB
-    // We need to map our Android-compatible thresholds to iOS range
+    // SIMPLE FIX: Use iOS-appropriate values that actually work
+    // AVAudioRecorder averagePowerForChannel typical values:
+    // - Background noise: -50 to -40 dB
+    // - Normal speech: -30 to -10 dB  
+    // - Loud speech: -10 to 0 dB
     
-    // If thresholds seem to be in Android range (negative values closer to 0), adjust them
-    if (self.noiseFloorDb > -100) {
-        // Likely Android-style threshold, map to iOS range
-        // Android -50dB noise floor -> iOS -80dB noise floor
-        // Android -35dB voice threshold -> iOS -40dB voice threshold
-        self.noiseFloorDb = self.noiseFloorDb - 30.0;  // Make more negative for iOS
-        self.voiceActivityThresholdDb = self.voiceActivityThresholdDb - 5.0;  // Adjust voice threshold
-        
-        NSLog(@"[AudioRecorder] Adjusted thresholds for iOS: NoiseFloor: %.1fdB, VoiceThreshold: %.1fdB", 
-              self.noiseFloorDb, self.voiceActivityThresholdDb);
-    }
+    // Use working iOS thresholds (ignore the Android values)
+    self.noiseFloorDb = -50.0;      // Background noise level
+    self.voiceActivityThresholdDb = -30.0;  // Normal speech level
     
-    // Ensure values are within iOS range
-    self.noiseFloorDb = MAX(-160.0, MIN(0.0, self.noiseFloorDb));
-    self.voiceActivityThresholdDb = MAX(-160.0, MIN(0.0, self.voiceActivityThresholdDb));
-    
-    // Ensure voice threshold is higher than noise floor
-    if (self.voiceActivityThresholdDb <= self.noiseFloorDb) {
-        self.voiceActivityThresholdDb = self.noiseFloorDb + 10.0;
-    }
+    NSLog(@"[AudioRecorder] Using iOS-optimized thresholds: NoiseFloor: %.1fdB, VoiceThreshold: %.1fdB", 
+          self.noiseFloorDb, self.voiceActivityThresholdDb);
 }
 
 - (void)startLevelMonitoring {
@@ -238,9 +226,9 @@ RCT_EXPORT_MODULE()
     float averagePower = [self.audioRecorder averagePowerForChannel:0]; // This is already in dB
     NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
     
-    // Add detailed logging with proper AVAudioRecorder range understanding
-    NSLog(@"[AudioRecorder] Amplitude: %.0f, dB: %.1f, NoiseFloor: %.1f, VoiceThreshold: %.1f", 
-          averagePower, averagePower, self.noiseFloorDb, self.voiceActivityThresholdDb);
+    // Debug logging exactly like Android
+    NSLog(@"[AudioRecorder] dB: %.1f, NoiseFloor: %.1f, VoiceThreshold: %.1f", 
+          averagePower, self.noiseFloorDb, self.voiceActivityThresholdDb);
     
     // Check if we've reached max duration
     if (currentTime - self.recordingStartTime >= self.maxDurationSeconds) {
