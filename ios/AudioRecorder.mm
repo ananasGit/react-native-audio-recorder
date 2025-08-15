@@ -62,10 +62,19 @@ RCT_EXPORT_MODULE()
     NSError *error = nil;
     
     // Use Record category for better recording performance and noise reduction
-    [session setCategory:AVAudioSessionCategoryRecord
-                    mode:AVAudioSessionModeMeasurement  // Better for voice recording
-                 options:AVAudioSessionCategoryOptionAllowBluetooth
-                   error:&error];
+    // Note: Use the iOS-compatible method signature
+    if (@available(iOS 10.0, *)) {
+        [session setCategory:AVAudioSessionCategoryRecord
+                        mode:AVAudioSessionModeMeasurement
+                     options:AVAudioSessionCategoryOptionAllowBluetooth
+                       error:&error];
+    } else {
+        // Fallback for older iOS versions
+        [session setCategory:AVAudioSessionCategoryRecord error:&error];
+        if (!error) {
+            [session setMode:AVAudioSessionModeMeasurement error:&error];
+        }
+    }
     if (error) {
         reject(@"audio_session_error", @"Failed to setup audio session", error);
         return;
@@ -420,8 +429,9 @@ RCT_EXPORT_MODULE()
     resolve(nil);
 }
 
-- (BOOL)isRecording {
-    return self.audioRecorder != nil && self.audioRecorder.isRecording;
+- (NSNumber *)isRecording {
+    BOOL recording = self.audioRecorder != nil && self.audioRecorder.isRecording;
+    return @(recording);
 }
 
 - (void)checkMicrophonePermission:(RCTPromiseResolveBlock)resolve
