@@ -72,10 +72,14 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     // Store config
     thinkingPauseThreshold = config.getDouble("thinkingPauseThreshold")
     endOfSpeechThreshold = config.getDouble("endOfSpeechThreshold")
-    noiseFloorDb = config.getDouble("noiseFloorDb")
-    voiceActivityThresholdDb = config.getDouble("voiceActivityThresholdDb")
     maxDurationSeconds = config.getDouble("maxDurationSeconds")
     minRecordingDurationMs = config.getDouble("minRecordingDurationMs")
+    
+    // Store VAD thresholds (with defaults if not provided)
+    noiseFloorDb = if (config.hasKey("noiseFloorDb")) config.getDouble("noiseFloorDb") else -50.0
+    voiceActivityThresholdDb = if (config.hasKey("voiceActivityThresholdDb")) config.getDouble("voiceActivityThresholdDb") else -35.0
+    
+    android.util.Log.i("AudioRecorder", "Config - NoiseFloor: $noiseFloorDb, VoiceThreshold: $voiceActivityThresholdDb, EndThreshold: $endOfSpeechThreshold")
 
     // Reset state
     recordingStartTime = 0
@@ -195,19 +199,27 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
 
   private fun startRecordingInternal() {
     try {
+      android.util.Log.i("AudioRecorder", "Starting recording - Single source: $useSingleRecordingSource")
+      
       mediaRecorder?.prepare()
+      android.util.Log.d("AudioRecorder", "MediaRecorder prepared")
+      
       mediaRecorder?.start()
+      android.util.Log.d("AudioRecorder", "MediaRecorder started")
       
       // Only start AudioRecord if using dual approach
       if (!useSingleRecordingSource) {
         audioRecord?.startRecording()
+        android.util.Log.d("AudioRecorder", "AudioRecord started")
       }
       
       isRecording = true
       recordingStartTime = System.currentTimeMillis()
+      android.util.Log.i("AudioRecorder", "Recording started successfully at $recordingStartTime")
       
       startLevelMonitoring()
     } catch (e: IOException) {
+      android.util.Log.e("AudioRecorder", "Failed to start recording", e)
       throw RuntimeException("Failed to start recording: ${e.message}")
     }
   }
@@ -247,6 +259,7 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     val amplitude = try {
       mediaRecorder?.maxAmplitude ?: 0
     } catch (e: Exception) {
+      android.util.Log.e("AudioRecorder", "Error getting amplitude: ${e.message}")
       0
     }
     
@@ -256,6 +269,9 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     } else {
       -96.0
     }
+
+    // Add debug logging
+    android.util.Log.d("AudioRecorder", "Amplitude: $amplitude, dB: $dbLevel, NoiseFloor: $noiseFloorDb, VoiceThreshold: $voiceActivityThresholdDb")
 
     processVoiceActivity(dbLevel, currentTime)
   }
@@ -278,11 +294,14 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     // Simple but effective voice activity detection
     val isVoice = dbLevel > noiseFloorDb && dbLevel > voiceActivityThresholdDb
 
+    android.util.Log.d("AudioRecorder", "Voice Activity - dB: $dbLevel, isVoice: $isVoice, hasDetectedVoice: $hasDetectedVoice")
+
     if (isVoice) {
       // Voice detected
       if (!hasDetectedVoice) {
         hasDetectedVoice = true
         actualSpeechStartTime = currentTime
+        android.util.Log.i("AudioRecorder", "VOICE STARTED - First voice detected at ${currentTime - recordingStartTime}ms")
       }
 
       lastVoiceActivityTime = currentTime
@@ -296,9 +315,12 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
       // Silence detected after voice
       val silenceDuration = (currentTime - lastVoiceActivityTime) / 1000.0
 
+      android.util.Log.d("AudioRecorder", "SILENCE - Duration: ${silenceDuration}s, ThinkingThreshold: $thinkingPauseThreshold, EndThreshold: $endOfSpeechThreshold")
+
       if (silenceDuration >= thinkingPauseThreshold && !isInThinkingPause) {
         // Entered thinking pause
         isInThinkingPause = true
+        android.util.Log.i("AudioRecorder", "THINKING PAUSE - Entered at ${silenceDuration}s")
 
         // Schedule end-of-speech detection
         val remainingTime = ((endOfSpeechThreshold - thinkingPauseThreshold) * 1000).toLong()
