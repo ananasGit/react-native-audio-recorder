@@ -58,6 +58,10 @@ RCT_EXPORT_MODULE()
     NSLog(@"[AudioRecorder] Config - NoiseFloor: %.1fdB, VoiceThreshold: %.1fdB, EndThreshold: %.1fs", 
           self.noiseFloorDb, self.voiceActivityThresholdDb, self.endOfSpeechThreshold);
     
+    // CRITICAL DEBUG: Log the ACTUAL config values received from JS
+    NSLog(@"[AudioRecorder] RAW CONFIG VALUES - noiseFloorDb(): %.3f, voiceActivityThresholdDb(): %.3f", 
+          config.noiseFloorDb(), config.voiceActivityThresholdDb());
+    
     // Reset state
     self.recordingStartTime = 0;
     self.lastVoiceActivityTime = 0;
@@ -198,43 +202,41 @@ RCT_EXPORT_MODULE()
 }
 
 - (void)startLevelMonitoring {
-    // Schedule timer on main thread to match Android's Handler approach
-    if ([NSThread isMainThread]) {
+    NSLog(@"[AudioRecorder] startLevelMonitoring called - starting timer");
+    // SIMPLIFIED: Always schedule on main queue to match Android's Handler exactly
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSLog(@"[AudioRecorder] Creating timer on main queue");
         self.levelTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
                                                            target:self
                                                          selector:@selector(updateAudioLevels)
                                                          userInfo:nil
                                                           repeats:YES];
-    } else {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self.levelTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
-                                                               target:self
-                                                             selector:@selector(updateAudioLevels)
-                                                             userInfo:nil
-                                                              repeats:YES];
-        });
-    }
+        NSLog(@"[AudioRecorder] Timer created: %@", self.levelTimer);
+    });
 }
 
 - (void)stopLevelMonitoring {
-    // Ensure timer operations happen on main thread for thread safety
-    if ([NSThread isMainThread]) {
+    NSLog(@"[AudioRecorder] stopLevelMonitoring called");
+    // SIMPLIFIED: Always stop on main queue to match Android
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSLog(@"[AudioRecorder] Stopping timers on main queue");
         [self.levelTimer invalidate];
         [self.silenceTimer invalidate];
         self.levelTimer = nil;
         self.silenceTimer = nil;
-    } else {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self.levelTimer invalidate];
-            [self.silenceTimer invalidate];
-            self.levelTimer = nil;
-            self.silenceTimer = nil;
-        });
-    }
+        NSLog(@"[AudioRecorder] Timers stopped and nullified");
+    });
 }
 
 - (void)updateAudioLevels {
+    // CRITICAL DEBUG: Check if timer is firing at all
+    NSLog(@"[AudioRecorder] updateAudioLevels called - isRecording: %@, audioRecorder: %@, audioRecorder.isRecording: %@",
+          self.isRecording ? @"YES" : @"NO", 
+          self.audioRecorder ? @"EXISTS" : @"NIL",
+          (self.audioRecorder && self.audioRecorder.isRecording) ? @"YES" : @"NO");
+    
     if (!self.isRecording || !self.audioRecorder || !self.audioRecorder.isRecording) {
+        NSLog(@"[AudioRecorder] updateAudioLevels: Early return due to invalid state");
         return;
     }
     
@@ -242,9 +244,9 @@ RCT_EXPORT_MODULE()
     float averagePower = [self.audioRecorder averagePowerForChannel:0]; // This is already in dB
     NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
     
-    // Debug logging exactly like Android
-    NSLog(@"[AudioRecorder] dB: %.1f, NoiseFloor: %.1f, VoiceThreshold: %.1f", 
-          averagePower, self.noiseFloorDb, self.voiceActivityThresholdDb);
+    // Debug logging exactly like Android - EVERY UPDATE
+    NSLog(@"[AudioRecorder] LEVEL UPDATE - dB: %.1f, NoiseFloor: %.1f, VoiceThreshold: %.1f, isRecording: %@", 
+          averagePower, self.noiseFloorDb, self.voiceActivityThresholdDb, self.isRecording ? @"YES" : @"NO");
     
     // Check if we've reached max duration
     if (currentTime - self.recordingStartTime >= self.maxDurationSeconds) {
