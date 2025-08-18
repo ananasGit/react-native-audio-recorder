@@ -459,21 +459,23 @@ RCT_EXPORT_MODULE()
 }
 
 - (NSNumber *)isRecording {
-    return @(self.isRecording);
+    return @(self->_isRecording);
 }
 
 - (void)checkMicrophonePermission:(RCTPromiseResolveBlock)resolve
                           reject:(RCTPromiseRejectBlock)reject {
     
     AVAudioSessionRecordPermission permission = [[AVAudioSession sharedInstance] recordPermission];
-    resolve(@(permission == AVAudioSessionRecordPermissionGranted));
+    BOOL hasPermission = (permission == AVAudioSessionRecordPermissionGranted);
+    resolve(@(hasPermission));
 }
 
 - (void)requestMicrophonePermission:(RCTPromiseResolveBlock)resolve
                             reject:(RCTPromiseRejectBlock)reject {
     
     [[AVAudioSession sharedInstance] requestRecordPermission:^(BOOL granted) {
-        resolve(@(granted));
+        NSNumber *result = @(granted);
+        resolve(result);
     }];
 }
 
