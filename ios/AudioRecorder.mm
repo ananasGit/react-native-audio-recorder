@@ -184,11 +184,18 @@ RCT_EXPORT_MODULE()
     }
     
     self.isRecording = YES;
+    NSLog(@"[AudioRecorder] CRITICAL DEBUG: Set isRecording = YES, current value: %@", self.isRecording ? @"YES" : @"NO");
     self.recordingStartTime = [[NSDate date] timeIntervalSince1970];
     NSLog(@"[AudioRecorder] Recording started successfully at %.0f", self.recordingStartTime);
     
+    // CRITICAL DEBUG: Check isRecording state before starting timer
+    NSLog(@"[AudioRecorder] About to start level monitoring, isRecording = %@", self.isRecording ? @"YES" : @"NO");
+    
     // Start level monitoring
     [self startLevelMonitoring];
+    
+    // CRITICAL DEBUG: Check isRecording state after starting timer
+    NSLog(@"[AudioRecorder] Level monitoring started, isRecording = %@", self.isRecording ? @"YES" : @"NO");
     
     // Don't resolve here - let finishRecordingWithReason handle the promise
     NSLog(@"[AudioRecorder] Recording setup complete, waiting for voice activity detection");
@@ -453,7 +460,8 @@ RCT_EXPORT_MODULE()
 }
 
 - (NSNumber *)isRecording {
-    return @(self->_isRecording);
+    NSLog(@"[AudioRecorder] isRecording method called, returning: %@", self.isRecording ? @"YES" : @"NO");
+    return @(self.isRecording);
 }
 
 - (void)checkMicrophonePermission:(RCTPromiseResolveBlock)resolve
