@@ -206,24 +206,39 @@ RCT_EXPORT_MODULE()
 }
 
 - (void)startLevelMonitoring {
-    // Ensure timer runs on main thread for thread safety (matching Android's Handler approach)
-    dispatch_async(dispatch_get_main_queue(), ^{
+    // Schedule timer on main thread to match Android's Handler approach
+    if ([NSThread isMainThread]) {
         self.levelTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
                                                            target:self
                                                          selector:@selector(updateAudioLevels)
                                                          userInfo:nil
                                                           repeats:YES];
-    });
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.levelTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
+                                                               target:self
+                                                             selector:@selector(updateAudioLevels)
+                                                             userInfo:nil
+                                                              repeats:YES];
+        });
+    }
 }
 
 - (void)stopLevelMonitoring {
     // Ensure timer operations happen on main thread for thread safety
-    dispatch_async(dispatch_get_main_queue(), ^{
+    if ([NSThread isMainThread]) {
         [self.levelTimer invalidate];
         [self.silenceTimer invalidate];
         self.levelTimer = nil;
         self.silenceTimer = nil;
-    });
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.levelTimer invalidate];
+            [self.silenceTimer invalidate];
+            self.levelTimer = nil;
+            self.silenceTimer = nil;
+        });
+    }
 }
 
 - (void)updateAudioLevels {
@@ -269,8 +284,10 @@ RCT_EXPORT_MODULE()
         self.isInThinkingPause = NO;
         
         // Cancel any pending silence timer
-        [self.silenceTimer invalidate];
-        self.silenceTimer = nil;
+        if (self.silenceTimer) {
+            [self.silenceTimer invalidate];
+            self.silenceTimer = nil;
+        }
         
     } else if (self.hasDetectedVoice) {
         // Silence detected after voice
@@ -286,16 +303,35 @@ RCT_EXPORT_MODULE()
             
             // Schedule end-of-speech detection with calculated remaining time
             NSTimeInterval remainingTime = self.endOfSpeechThreshold - self.thinkingPauseThreshold;
-            self.silenceTimer = [NSTimer scheduledTimerWithTimeInterval:remainingTime
-                                                                 target:self
-                                                               selector:@selector(handleEndOfSpeech)
-                                                               userInfo:nil
-                                                                repeats:NO];
+            if (remainingTime > 0) {
+                // Ensure timer is scheduled on main thread
+                if ([NSThread isMainThread]) {
+                    self.silenceTimer = [NSTimer scheduledTimerWithTimeInterval:remainingTime
+                                                                         target:self
+                                                                       selector:@selector(handleEndOfSpeech)
+                                                                       userInfo:nil
+                                                                        repeats:NO];
+                } else {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        self.silenceTimer = [NSTimer scheduledTimerWithTimeInterval:remainingTime
+                                                                             target:self
+                                                                           selector:@selector(handleEndOfSpeech)
+                                                                           userInfo:nil
+                                                                            repeats:NO];
+                    });
+                }
+            }
         }
     }
 }
 
 - (void)handleEndOfSpeech {
+    // Safety check: ensure we're still recording
+    if (!self.isRecording || !self.audioRecorder) {
+        NSLog(@"[AudioRecorder] handleEndOfSpeech called but not recording, ignoring");
+        return;
+    }
+    
     NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
     NSTimeInterval totalSilence = currentTime - self.lastVoiceActivityTime;
     NSTimeInterval totalRecordingDuration = (currentTime - self.recordingStartTime) * 1000; // Convert to ms
@@ -444,6 +480,9 @@ RCT_EXPORT_MODULE()
 - (void)cleanup {
     // Comprehensive cleanup matching Android's approach
     @try {
+        // Stop timers first to prevent crashes
+        [self stopLevelMonitoring];
+        
         // Deactivate audio session (CRITICAL FIX - missing in original)
         NSError *error = nil;
         [[AVAudioSession sharedInstance] setActive:NO error:&error];
@@ -453,9 +492,15 @@ RCT_EXPORT_MODULE()
         
         // Release audio recorder
         if (self.audioRecorder) {
-            [self.audioRecorder stop];
+            if (self.audioRecorder.isRecording) {
+                [self.audioRecorder stop];
+            }
             self.audioRecorder = nil;
         }
+        
+        // Reset state
+        self.isRecording = NO;
+        
     } @catch (NSException *exception) {
         NSLog(@"[AudioRecorder] Exception during cleanup: %@", exception.reason);
     }
