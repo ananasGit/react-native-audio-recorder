@@ -17,7 +17,7 @@
 @property (nonatomic) NSTimeInterval totalSpeechDuration;
 @property (nonatomic) BOOL hasDetectedVoice;
 @property (nonatomic) BOOL isInThinkingPause;
-@property (nonatomic) BOOL isRecording;
+@property (nonatomic) BOOL recordingActive;
 @property (nonatomic, strong) RCTPromiseResolveBlock currentPromiseResolve;
 @property (nonatomic, strong) RCTPromiseRejectBlock currentPromiseReject;
 @end
@@ -29,7 +29,7 @@ RCT_EXPORT_MODULE()
                resolve:(RCTPromiseResolveBlock)resolve
                 reject:(RCTPromiseRejectBlock)reject {
     
-    if (self.isRecording) {
+    if (self.recordingActive) {
         reject(@"recording_in_progress", @"Recording is already in progress", nil);
         return;
     }
@@ -69,7 +69,7 @@ RCT_EXPORT_MODULE()
     self.totalSpeechDuration = 0;
     self.hasDetectedVoice = NO;
     self.isInThinkingPause = NO;
-    self.isRecording = NO;
+    self.recordingActive = NO;
     self.currentPromiseResolve = resolve;
     self.currentPromiseReject = reject;
     
@@ -183,19 +183,19 @@ RCT_EXPORT_MODULE()
         return;
     }
     
-    self.isRecording = YES;
-    NSLog(@"[AudioRecorder] CRITICAL DEBUG: Set isRecording = YES, current value: %@", self.isRecording ? @"YES" : @"NO");
+    self.recordingActive = YES;
+    NSLog(@"[AudioRecorder] CRITICAL DEBUG: Set recordingActive = YES, current value: %@", self.recordingActive ? @"YES" : @"NO");
     self.recordingStartTime = [[NSDate date] timeIntervalSince1970];
     NSLog(@"[AudioRecorder] Recording started successfully at %.0f", self.recordingStartTime);
     
     // CRITICAL DEBUG: Check isRecording state before starting timer
-    NSLog(@"[AudioRecorder] About to start level monitoring, isRecording = %@", self.isRecording ? @"YES" : @"NO");
+    NSLog(@"[AudioRecorder] About to start level monitoring, recordingActive = %@", self.recordingActive ? @"YES" : @"NO");
     
     // Start level monitoring
     [self startLevelMonitoring];
     
-    // CRITICAL DEBUG: Check isRecording state after starting timer
-    NSLog(@"[AudioRecorder] Level monitoring started, isRecording = %@", self.isRecording ? @"YES" : @"NO");
+    // CRITICAL DEBUG: Check recordingActive after starting timer
+    NSLog(@"[AudioRecorder] Level monitoring started, recordingActive = %@", self.recordingActive ? @"YES" : @"NO");
     
     // Don't resolve here - let finishRecordingWithReason handle the promise
     NSLog(@"[AudioRecorder] Recording setup complete, waiting for voice activity detection");
@@ -237,12 +237,12 @@ RCT_EXPORT_MODULE()
 
 - (void)updateAudioLevels {
     // CRITICAL DEBUG: Check if timer is firing at all
-    NSLog(@"[AudioRecorder] updateAudioLevels called - isRecording: %@, audioRecorder: %@, audioRecorder.isRecording: %@",
-          self.isRecording ? @"YES" : @"NO", 
+    NSLog(@"[AudioRecorder] updateAudioLevels called - recordingActive: %@, audioRecorder: %@, audioRecorder.isRecording: %@",
+          self.recordingActive ? @"YES" : @"NO", 
           self.audioRecorder ? @"EXISTS" : @"NIL",
           (self.audioRecorder && self.audioRecorder.isRecording) ? @"YES" : @"NO");
     
-    if (!self.isRecording || !self.audioRecorder || !self.audioRecorder.isRecording) {
+    if (!self.recordingActive || !self.audioRecorder || !self.audioRecorder.isRecording) {
         NSLog(@"[AudioRecorder] updateAudioLevels: Early return due to invalid state");
         return;
     }
@@ -328,7 +328,7 @@ RCT_EXPORT_MODULE()
 
 - (void)handleEndOfSpeech {
     // Safety check: ensure we're still recording
-    if (!self.isRecording || !self.audioRecorder) {
+    if (!self.recordingActive || !self.audioRecorder) {
         NSLog(@"[AudioRecorder] handleEndOfSpeech called but not recording, ignoring");
         return;
     }
@@ -363,7 +363,7 @@ RCT_EXPORT_MODULE()
 - (void)finishRecordingWithReason:(NSString *)reason {
     [self stopLevelMonitoring];
 
-    if (!self.isRecording) {
+    if (!self.recordingActive) {
         return;
     }
 
@@ -372,7 +372,7 @@ RCT_EXPORT_MODULE()
             [self.audioRecorder stop];
         }
         
-        self.isRecording = NO;
+        self.recordingActive = NO;
 
         NSTimeInterval endTime = [[NSDate date] timeIntervalSince1970];
         double totalDuration = endTime - self.recordingStartTime;
@@ -413,7 +413,7 @@ RCT_EXPORT_MODULE()
 - (void)stopRecording:(RCTPromiseResolveBlock)resolve
                reject:(RCTPromiseRejectBlock)reject {
     
-    if (!self.isRecording) {
+    if (!self.recordingActive) {
         reject(@"not_recording", @"No recording in progress", nil);
         return;
     }
@@ -437,12 +437,12 @@ RCT_EXPORT_MODULE()
     
     [self stopLevelMonitoring];
 
-    if (self.isRecording) {
+    if (self.recordingActive) {
         @try {
             if (self.audioRecorder && self.audioRecorder.isRecording) {
                 [self.audioRecorder stop];
             }
-            self.isRecording = NO;
+            self.recordingActive = NO;
 
             // Delete the file
             NSError *error;
@@ -460,8 +460,7 @@ RCT_EXPORT_MODULE()
 }
 
 - (NSNumber *)isRecording {
-    NSLog(@"[AudioRecorder] isRecording method called, returning: %@", self.isRecording ? @"YES" : @"NO");
-    return @(self.isRecording);
+    return @(self.recordingActive);
 }
 
 - (void)checkMicrophonePermission:(RCTPromiseResolveBlock)resolve
@@ -503,7 +502,7 @@ RCT_EXPORT_MODULE()
         }
         
         // Reset state
-        self.isRecording = NO;
+        self.recordingActive = NO;
         
     } @catch (NSException *exception) {
         NSLog(@"[AudioRecorder] Exception during cleanup: %@", exception.reason);
