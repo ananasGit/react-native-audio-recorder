@@ -17,6 +17,7 @@
 @property (nonatomic) NSTimeInterval totalSpeechDuration;
 @property (nonatomic) BOOL hasDetectedVoice;
 @property (nonatomic) BOOL isInThinkingPause;
+@property (nonatomic) BOOL isRecording;
 @property (nonatomic, strong) RCTPromiseResolveBlock currentPromiseResolve;
 @property (nonatomic, strong) RCTPromiseRejectBlock currentPromiseReject;
 @end
@@ -28,7 +29,7 @@ RCT_EXPORT_MODULE()
                resolve:(RCTPromiseResolveBlock)resolve
                 reject:(RCTPromiseRejectBlock)reject {
     
-    if (self.audioRecorder && self.audioRecorder.isRecording) {
+    if (self.isRecording) {
         reject(@"recording_in_progress", @"Recording is already in progress", nil);
         return;
     }
@@ -64,6 +65,7 @@ RCT_EXPORT_MODULE()
     self.totalSpeechDuration = 0;
     self.hasDetectedVoice = NO;
     self.isInThinkingPause = NO;
+    self.isRecording = NO;
     self.currentPromiseResolve = resolve;
     self.currentPromiseReject = reject;
     
@@ -177,6 +179,7 @@ RCT_EXPORT_MODULE()
         return;
     }
     
+    self.isRecording = YES;
     self.recordingStartTime = [[NSDate date] timeIntervalSince1970];
     NSLog(@"[AudioRecorder] Recording started successfully at %.0f", self.recordingStartTime);
     
@@ -203,22 +206,28 @@ RCT_EXPORT_MODULE()
 }
 
 - (void)startLevelMonitoring {
-    self.levelTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
-                                                       target:self
-                                                     selector:@selector(updateAudioLevels)
-                                                     userInfo:nil
-                                                      repeats:YES];
+    // Ensure timer runs on main thread for thread safety (matching Android's Handler approach)
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.levelTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
+                                                           target:self
+                                                         selector:@selector(updateAudioLevels)
+                                                         userInfo:nil
+                                                          repeats:YES];
+    });
 }
 
 - (void)stopLevelMonitoring {
-    [self.levelTimer invalidate];
-    [self.silenceTimer invalidate];
-    self.levelTimer = nil;
-    self.silenceTimer = nil;
+    // Ensure timer operations happen on main thread for thread safety
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.levelTimer invalidate];
+        [self.silenceTimer invalidate];
+        self.levelTimer = nil;
+        self.silenceTimer = nil;
+    });
 }
 
 - (void)updateAudioLevels {
-    if (!self.audioRecorder || !self.audioRecorder.isRecording) {
+    if (!self.isRecording || !self.audioRecorder || !self.audioRecorder.isRecording) {
         return;
     }
     
@@ -317,12 +326,16 @@ RCT_EXPORT_MODULE()
 - (void)finishRecordingWithReason:(NSString *)reason {
     [self stopLevelMonitoring];
 
-    if (!self.audioRecorder || !self.audioRecorder.isRecording) {
+    if (!self.isRecording) {
         return;
     }
 
     @try {
-        [self.audioRecorder stop];
+        if (self.audioRecorder && self.audioRecorder.isRecording) {
+            [self.audioRecorder stop];
+        }
+        
+        self.isRecording = NO;
 
         NSTimeInterval endTime = [[NSDate date] timeIntervalSince1970];
         double totalDuration = endTime - self.recordingStartTime;
@@ -356,19 +369,20 @@ RCT_EXPORT_MODULE()
         self.currentPromiseResolve = nil;
         self.currentPromiseReject = nil;
     } @finally {
-        self.audioRecorder = nil;
+        [self cleanup];
     }
 }
 
 - (void)stopRecording:(RCTPromiseResolveBlock)resolve
                reject:(RCTPromiseRejectBlock)reject {
     
-    if (!self.audioRecorder || !self.audioRecorder.isRecording) {
+    if (!self.isRecording) {
         reject(@"not_recording", @"No recording in progress", nil);
         return;
     }
     
-    // Update promise handlers for manual stop
+    // CRITICAL FIX: Don't overwrite existing promise - update it properly
+    // This matches Android's behavior where currentPromise is updated, not overwritten
     self.currentPromiseResolve = resolve;
     self.currentPromiseReject = reject;
     
@@ -386,9 +400,12 @@ RCT_EXPORT_MODULE()
     
     [self stopLevelMonitoring];
 
-    if (self.audioRecorder) {
+    if (self.isRecording) {
         @try {
-            [self.audioRecorder stop];
+            if (self.audioRecorder && self.audioRecorder.isRecording) {
+                [self.audioRecorder stop];
+            }
+            self.isRecording = NO;
 
             // Delete the file
             NSError *error;
@@ -397,17 +414,16 @@ RCT_EXPORT_MODULE()
         } @catch (NSException *exception) {
             // Ignore errors during cleanup
         }
-        self.audioRecorder = nil;
     }
 
+    [self cleanup];
     self.currentPromiseResolve = nil;
     self.currentPromiseReject = nil;
     resolve(nil);
 }
 
 - (NSNumber *)isRecording {
-    BOOL recording = self.audioRecorder != nil && self.audioRecorder.isRecording;
-    return @(recording);
+    return @(self.isRecording);
 }
 
 - (void)checkMicrophonePermission:(RCTPromiseResolveBlock)resolve
@@ -423,6 +439,26 @@ RCT_EXPORT_MODULE()
     [[AVAudioSession sharedInstance] requestRecordPermission:^(BOOL granted) {
         resolve(@(granted));
     }];
+}
+
+- (void)cleanup {
+    // Comprehensive cleanup matching Android's approach
+    @try {
+        // Deactivate audio session (CRITICAL FIX - missing in original)
+        NSError *error = nil;
+        [[AVAudioSession sharedInstance] setActive:NO error:&error];
+        if (error) {
+            NSLog(@"[AudioRecorder] Warning: Could not deactivate audio session: %@", error.localizedDescription);
+        }
+        
+        // Release audio recorder
+        if (self.audioRecorder) {
+            [self.audioRecorder stop];
+            self.audioRecorder = nil;
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"[AudioRecorder] Exception during cleanup: %@", exception.reason);
+    }
 }
 
 - (void)addListener:(NSString *)eventName {
