@@ -29,7 +29,6 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
   private var audioRecord: AudioRecord? = null
   private var isRecording = false
   
-  // Use single recording approach
   private var useSingleRecordingSource = true
   private var isPaused = false
   
@@ -69,19 +68,13 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
       return
     }
 
-    // Store config
     thinkingPauseThreshold = config.getDouble("thinkingPauseThreshold")
     endOfSpeechThreshold = config.getDouble("endOfSpeechThreshold")
     maxDurationSeconds = config.getDouble("maxDurationSeconds")
     minRecordingDurationMs = config.getDouble("minRecordingDurationMs")
     
-    // Store VAD thresholds (with defaults if not provided)
     noiseFloorDb = if (config.hasKey("noiseFloorDb")) config.getDouble("noiseFloorDb") else -50.0
     voiceActivityThresholdDb = if (config.hasKey("voiceActivityThresholdDb")) config.getDouble("voiceActivityThresholdDb") else -35.0
-    
-    android.util.Log.i("AudioRecorder", "Config - NoiseFloor: $noiseFloorDb, VoiceThreshold: $voiceActivityThresholdDb, EndThreshold: $endOfSpeechThreshold")
-
-    // Reset state
     recordingStartTime = 0
     lastVoiceActivityTime = 0
     actualSpeechStartTime = 0
@@ -93,10 +86,7 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     try {
       setupRecording(config)
       startRecordingInternal()
-      // Don't resolve here - let finishRecordingWithReason handle the promise
-      android.util.Log.i("AudioRecorder", "Recording setup complete, waiting for voice activity detection")
     } catch (e: Exception) {
-      // Clean up on failure
       cleanup()
       currentPromise = null
       promise.reject("recording_setup_error", "Failed to setup recording: ${e.message}")
@@ -109,7 +99,6 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     val channels = config.getInt("channels")
     val bitRate = config.getInt("bitRate")
 
-    // Validate configuration
     if (sampleRate < 8000 || sampleRate > 48000) {
       throw IllegalArgumentException("Sample rate must be between 8000 and 48000 Hz")
     }
@@ -120,24 +109,20 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
       throw IllegalArgumentException("Bit rate must be between 8000 and 320000 bps")
     }
 
-    // Create output file
     val outputDir = reactApplicationContext.getExternalFilesDir(null)
     val fileName = "recording_${System.currentTimeMillis()}.$format"
     val outputFile = File(outputDir, fileName)
     outputFilePath = outputFile.absolutePath
 
     if (useSingleRecordingSource) {
-      // Use only MediaRecorder - it has built-in getMaxAmplitude()
       setupMediaRecorderOnly(format, sampleRate, channels, bitRate)
     } else {
-      // Original dual approach (for comparison)
       setupDualRecording(format, sampleRate, channels, bitRate)
     }
   }
 
   private fun setupMediaRecorderOnly(format: String, sampleRate: Int, channels: Int, bitRate: Int) {
     mediaRecorder = MediaRecorder().apply {
-      // Use VOICE_RECOGNITION source for better voice detection
       setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
       
       when (format) {
@@ -162,7 +147,6 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
   }
 
   private fun setupDualRecording(format: String, sampleRate: Int, channels: Int, bitRate: Int) {
-    // Setup MediaRecorder
     mediaRecorder = MediaRecorder().apply {
       setAudioSource(MediaRecorder.AudioSource.MIC)
       
@@ -184,13 +168,12 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
       setOutputFile(outputFilePath)
     }
 
-    // Setup AudioRecord for level monitoring (DIFFERENT SOURCE)
     val channelConfig = if (channels == 1) AudioFormat.CHANNEL_IN_MONO else AudioFormat.CHANNEL_IN_STEREO
     val audioFormat = AudioFormat.ENCODING_PCM_16BIT
     val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
     
     audioRecord = AudioRecord(
-      MediaRecorder.AudioSource.VOICE_RECOGNITION, // Different source!
+      MediaRecorder.AudioSource.VOICE_RECOGNITION,
       sampleRate,
       channelConfig,
       audioFormat,
@@ -200,27 +183,18 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
 
   private fun startRecordingInternal() {
     try {
-      android.util.Log.i("AudioRecorder", "Starting recording - Single source: $useSingleRecordingSource")
-      
       mediaRecorder?.prepare()
-      android.util.Log.d("AudioRecorder", "MediaRecorder prepared")
-      
       mediaRecorder?.start()
-      android.util.Log.d("AudioRecorder", "MediaRecorder started")
       
-      // Only start AudioRecord if using dual approach
       if (!useSingleRecordingSource) {
         audioRecord?.startRecording()
-        android.util.Log.d("AudioRecorder", "AudioRecord started")
       }
       
       isRecording = true
       recordingStartTime = System.currentTimeMillis()
-      android.util.Log.i("AudioRecorder", "Recording started successfully at $recordingStartTime")
       
       startLevelMonitoring()
     } catch (e: IOException) {
-      android.util.Log.e("AudioRecorder", "Failed to start recording", e)
       throw RuntimeException("Failed to start recording: ${e.message}")
     }
   }
@@ -230,7 +204,7 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
       override fun run() {
         if (isRecording) {
           updateAudioLevels()
-          mainHandler.postDelayed(this, 100) // Check every 100ms
+          mainHandler.postDelayed(this, 100)
         }
       }
     }
@@ -242,7 +216,6 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
 
     val currentTime = System.currentTimeMillis()
 
-    // Check if we've reached max duration
     if ((currentTime - recordingStartTime) / 1000.0 >= maxDurationSeconds) {
       finishRecordingWithReason("max_duration_reached")
       return
@@ -256,23 +229,18 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
   }
 
   private fun updateAudioLevelsWithMediaRecorder(currentTime: Long) {
-    // Use MediaRecorder's built-in amplitude detection
     val amplitude = try {
       mediaRecorder?.maxAmplitude ?: 0
     } catch (e: Exception) {
-      android.util.Log.e("AudioRecorder", "Error getting amplitude: ${e.message}")
       0
     }
     
-    // Convert amplitude to dB (MediaRecorder amplitude is 0-32767)
     val dbLevel = if (amplitude > 0) {
       20 * log10(amplitude.toDouble() / 32767.0)
     } else {
       -96.0
     }
 
-    // Add debug logging
-    android.util.Log.d("AudioRecorder", "Amplitude: $amplitude, dB: $dbLevel, NoiseFloor: $noiseFloorDb, VoiceThreshold: $voiceActivityThresholdDb")
 
     processVoiceActivity(dbLevel, currentTime)
   }
@@ -292,38 +260,26 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
   }
 
   private fun processVoiceActivity(dbLevel: Double, currentTime: Long) {
-    // Simple but effective voice activity detection
     val isVoice = dbLevel > noiseFloorDb && dbLevel > voiceActivityThresholdDb
 
-    android.util.Log.d("AudioRecorder", "Voice Activity - dB: $dbLevel, isVoice: $isVoice, hasDetectedVoice: $hasDetectedVoice")
-
     if (isVoice) {
-      // Voice detected
       if (!hasDetectedVoice) {
         hasDetectedVoice = true
         actualSpeechStartTime = currentTime
-        android.util.Log.i("AudioRecorder", "VOICE STARTED - First voice detected at ${currentTime - recordingStartTime}ms")
       }
 
       lastVoiceActivityTime = currentTime
       isInThinkingPause = false
 
-      // Cancel any pending silence timer
       silenceTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
       silenceTimeoutRunnable = null
 
     } else if (hasDetectedVoice) {
-      // Silence detected after voice
       val silenceDuration = (currentTime - lastVoiceActivityTime) / 1000.0
 
-      android.util.Log.d("AudioRecorder", "SILENCE - Duration: ${silenceDuration}s, ThinkingThreshold: $thinkingPauseThreshold, EndThreshold: $endOfSpeechThreshold")
-
       if (silenceDuration >= thinkingPauseThreshold && !isInThinkingPause) {
-        // Entered thinking pause
         isInThinkingPause = true
-        android.util.Log.i("AudioRecorder", "THINKING PAUSE - Entered at ${silenceDuration}s")
 
-        // Schedule end-of-speech detection
         val remainingTime = ((endOfSpeechThreshold - thinkingPauseThreshold) * 1000).toLong()
         silenceTimeoutRunnable = Runnable { handleEndOfSpeech() }
         mainHandler.postDelayed(silenceTimeoutRunnable!!, remainingTime)
@@ -343,7 +299,7 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     return if (amplitude > 0) {
       20 * log10(amplitude / 32767.0)
     } else {
-      -96.0 // Minimum dB level
+      -96.0
     }
   }
 
@@ -352,23 +308,15 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
     val totalSilence = (currentTime - lastVoiceActivityTime) / 1000.0
     val totalRecordingDuration = currentTime - recordingStartTime
 
-    android.util.Log.i("AudioRecorder", "END OF SPEECH CHECK - TotalSilence: ${totalSilence}s, Threshold: $endOfSpeechThreshold, RecordingDuration: ${totalRecordingDuration}ms, MinDuration: $minRecordingDurationMs")
 
     if (totalSilence >= endOfSpeechThreshold) {
-      // Calculate actual speech duration (excluding final silence)
       totalSpeechDuration = (lastVoiceActivityTime - actualSpeechStartTime) / 1000.0
       
-      android.util.Log.i("AudioRecorder", "SILENCE THRESHOLD MET - SpeechDuration: ${totalSpeechDuration}s")
-
-      // Only finish if we have minimum recording duration
       if (totalRecordingDuration >= minRecordingDurationMs) {
-        android.util.Log.i("AudioRecorder", "FINISHING RECORDING - Reason: silence_detected")
         finishRecordingWithReason("silence_detected")
       } else {
-        android.util.Log.w("AudioRecorder", "Recording too short - Need ${minRecordingDurationMs}ms, have ${totalRecordingDuration}ms")
       }
     } else {
-      android.util.Log.d("AudioRecorder", "Silence not long enough yet - ${totalSilence}s < $endOfSpeechThreshold")
     }
   }
 
@@ -387,7 +335,6 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
       val endTime = System.currentTimeMillis()
       val totalDuration = (endTime - recordingStartTime) / 1000.0
 
-      // Get file info
       val file = File(outputFilePath ?: "")
       val fileSize = if (file.exists()) file.length() else 0L
 
@@ -416,10 +363,8 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
       return
     }
 
-    // Update promise for manual stop
     currentPromise = promise
 
-    // Calculate speech duration up to now
     val currentTime = System.currentTimeMillis()
     if (hasDetectedVoice) {
       totalSpeechDuration = (currentTime - actualSpeechStartTime) / 1000.0
@@ -439,7 +384,6 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
         }
         isRecording = false
 
-        // Delete the file
         outputFilePath?.let { path ->
           val file = File(path)
           if (file.exists()) {
@@ -447,7 +391,6 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
           }
         }
       } catch (e: Exception) {
-        // Ignore errors during cleanup
       }
     }
 
@@ -482,24 +425,19 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
       return
     }
 
-    // For TurboModule context, we'll request permission and return current status
-    // The calling code should handle the actual permission result via system callbacks
     ActivityCompat.requestPermissions(
       currentActivity,
       arrayOf(Manifest.permission.RECORD_AUDIO),
       PERMISSION_REQUEST_CODE
     )
     
-    // Return false since permission was just requested
     promise.resolve(false)
   }
 
   override fun addListener(eventName: String) {
-    // No-op for now, required by TurboModule
   }
 
   override fun removeListeners(count: Double) {
-    // No-op for now, required by TurboModule
   }
 
   private fun hasRecordAudioPermission(): Boolean {
@@ -521,7 +459,6 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
       mediaRecorder?.release()
       audioRecord?.release()
     } catch (e: Exception) {
-      // Ignore cleanup errors
     }
     mediaRecorder = null
     audioRecord = null
