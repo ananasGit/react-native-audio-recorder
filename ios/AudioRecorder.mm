@@ -40,20 +40,20 @@ RCT_EXPORT_MODULE()
     self.maxDurationSeconds = config.maxDurationSeconds();
     self.minRecordingDurationMs = config.minRecordingDurationMs();
     
-    // Store VAD thresholds with fallback defaults (matching Android behavior)
+    // Store VAD thresholds with EXACT same fallback logic as Android
     self.noiseFloorDb = config.noiseFloorDb();
     self.voiceActivityThresholdDb = config.voiceActivityThresholdDb();
     
-    // Fallback to default values if not provided or invalid
+    // EXACT Android fallback logic: only use defaults if not provided (0.0 check)
     if (self.noiseFloorDb == 0.0) {
-        self.noiseFloorDb = -50.0;
+        self.noiseFloorDb = -50.0;  // Same as Android default
     }
     if (self.voiceActivityThresholdDb == 0.0) {
-        self.voiceActivityThresholdDb = -35.0;
+        self.voiceActivityThresholdDb = -35.0;  // Same as Android default
     }
     
-    // Adjust thresholds for iOS AVAudioRecorder range (-160 to 0 dB)
-    [self adjustThresholdsForIOS];
+    // DO NOT adjust thresholds - use exact same values as Android!
+    // [self adjustThresholdsForIOS]; // REMOVED - this was causing iOS to not auto-stop!
     
     NSLog(@"[AudioRecorder] Config - NoiseFloor: %.1fdB, VoiceThreshold: %.1fdB, EndThreshold: %.1fs", 
           self.noiseFloorDb, self.voiceActivityThresholdDb, self.endOfSpeechThreshold);
@@ -191,18 +191,10 @@ RCT_EXPORT_MODULE()
 }
 
 - (void)adjustThresholdsForIOS {
-    // SIMPLE FIX: Use iOS-appropriate values that actually work
-    // AVAudioRecorder averagePowerForChannel typical values:
-    // - Background noise: -50 to -40 dB
-    // - Normal speech: -30 to -10 dB  
-    // - Loud speech: -10 to 0 dB
-    
-    // Use working iOS thresholds (ignore the Android values)
-    self.noiseFloorDb = -50.0;      // Background noise level
-    self.voiceActivityThresholdDb = -30.0;  // Normal speech level
-    
-    NSLog(@"[AudioRecorder] Using iOS-optimized thresholds: NoiseFloor: %.1fdB, VoiceThreshold: %.1fdB", 
-          self.noiseFloorDb, self.voiceActivityThresholdDb);
+    // NO LONGER USED - this method was overriding Android config values
+    // and causing iOS to be too sensitive, preventing auto-stop functionality
+    // The exact same thresholds from Android work fine with AVAudioRecorder
+    NSLog(@"[AudioRecorder] adjustThresholdsForIOS called but disabled - using config values");
 }
 
 - (void)startLevelMonitoring {
