@@ -419,7 +419,7 @@ class AudioRecorderModule(reactContext: ReactApplicationContext) :
       return
     }
 
-    val currentActivity = currentActivity
+    val currentActivity = reactApplicationContext.currentActivity
     if (currentActivity == null) {
       promise.reject("no_activity", "No current activity available")
       return
